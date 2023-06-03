@@ -1,0 +1,18 @@
+import numpy as np
+#uniform для рандомных вещественных чисел
+#3 строки для двух скрытых и выходного слоев; 2 столбца, чтобы были координаты по долготе и широте
+weights = np.random.uniform(-1.5, 1.5, size = (3,2))
+
+def neural_network(input, weights):
+    hidden1 = input * weights[0]
+    hidden2 = hidden1 * weights[1]
+    pred = hidden2 * weights[2]
+    return pred
+#мой вариант - 4
+pred = neural_network(4, weights)
+print(pred)
+#######################
+import folium
+world_map = folium.Map(location = [0,0], zoom_start = 4)
+folium.Marker(location = pred, popup = 'Точка', icon=folium.Icon(color = 'gray')).add_to(world_map)
+world_map
