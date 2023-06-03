@@ -1,0 +1,227 @@
+import os
+import numpy as np
+import pandas as pd
+import re
+from keras.models import Model
+from keras.layers import Dense, Input, Dropout, LSTM, Activation
+from tensorflow.keras.layers import Embedding
+from keras.preprocessing import sequence
+from keras.initializers import glorot_uniform
+from keras.utils import np_utils
+from keras.callbacks import EarlyStopping
+from nltk.corpus import stopwords
+np.random.seed(1)
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+#Функция для удаления стоп-слов(предлогов, суффиксов. Пример: for, an, nor, but, or, yet, so)
+def remove_stopwords(input_text):
+    stopwords_list = stopwords.words('english')
+    #В анти-фильтре слова, которые могут нести смысл в предложениях
+    whitelist = ["n't", "not", "no"]
+    words = input_text.split() 
+    clean_words = [word for word in words if (word not in stopwords_list or word in whitelist) and len(word) > 1] 
+    return " ".join(clean_words)
+
+#Функция для удаления тега обращения. Пример: @VirginAmerica (если использовать датасет извне)
+def remove_mentions(input_text):
+    return re.sub(r'@\w+', '', input_text)
+    
+#Чтение датасета https://www.kaggle.com/datasets/crowdflower/twitter-airline-sentiment?resource=download
+train_df = pd.read_csv("Tweets.csv")
+train_df.head()
+
+#Создание массива Настроений
+Mood = train_df['airline_sentiment'].value_counts()
+
+#Отображение массива
+index = [1,2,3]
+plt.bar(index,Mood,color=['r','b','g'])
+plt.xticks(index,['Негативное','Нейтральное','Позитивное'])
+plt.ylabel('Количество сообщений')
+plt.title('Распределение настроений')
+
+# Разделим массив настроений по авиалиниям.
+def plot_sub_sentiment(Airline):
+    pdf = train_df[train_df['airline']==Airline]
+    count = pdf['airline_sentiment'].value_counts()
+    Index = [1,2,3]
+    color = ['red','blue','green']
+    plt.bar(Index,count,width=0.5,color=color)
+    plt.xticks(Index,['Негативное','Нетральное','Позитивное'])
+    plt.title('Распределие настроений у авиалинии: '+ Airline)
+
+airline_name = train_df['airline'].unique()
+plt.figure(1,figsize=(12,12))
+for i in range(6):
+    plt.subplot(3,2,i+1)
+    plot_sub_sentiment(airline_name[i])
+plt.show()
+
+#Статдатизация  
+train_df = train_df[['text', 'airline_sentiment']]
+train_df.text = train_df.text.apply(remove_mentions)
+train_df.loc[:,'sentiment'] = train_df.airline_sentiment.map({'negative':0,'neutral':1,'positive':2})
+train_df = train_df.drop(['airline_sentiment'], axis=1)
+train_df.head()
+
+#Поиск макс.длинны входящего предложения 
+raw_docs_train = train_df["text"].values
+sentiment_train = train_df['sentiment'].values
+maxLen = len(max(raw_docs_train, key=len).split())
+
+#Деление датасета на обучающую и тестировочную выборки
+X_train, X_test, Y_train, Y_test = train_test_split(raw_docs_train, sentiment_train, 
+                                                  stratify=sentiment_train, 
+                                                  random_state=42, 
+                                                  test_size=0.1, shuffle=True)
+print('# Train data samples:', X_train.shape)
+print('# Test data samples:', X_test.shape)
+assert X_train.shape[0] == Y_train.shape[0]
+assert X_test.shape[0] == Y_test.shape[0]
+
+#Приведение меток сообщений в датасете к следующему виду: 0 - Негативное, 1 - Нетральное, 2 - Позитивное
+num_labels = len(np.unique(sentiment_train))
+Y_oh_train = np_utils.to_categorical(Y_train, num_labels)
+Y_oh_test = np_utils.to_categorical(Y_test, num_labels)
+print(Y_oh_train.shape)
+
+#Загрузка и чтение массива GLoVe (GLobal Vectors) https://www.kaggle.com/datasets/watts2/glove6b50dtxt
+#Это предварительно обученные векторы слов
+def read_glove_vecs(glove_file):
+    with open(glove_file, encoding="utf8") as f:
+        words = set()
+        word_to_vec_map = {}
+        for line in f:
+            line = line.strip().split()
+            curr_word = line[0]
+            words.add(curr_word)
+            word_to_vec_map[curr_word] = np.array(line[1:], dtype=np.float64)
+        
+        i = 1
+        words_to_index = {}
+        index_to_words = {}
+        for w in sorted(words):
+            words_to_index[w] = i
+            index_to_words[i] = w
+            i = i + 1
+    return words_to_index, index_to_words, word_to_vec_map
+
+
+word_to_index, index_to_word, word_to_vec_map = read_glove_vecs('glove.6B.50d.txt')
+
+#Функция контвертации текста в массив индексов словаря GLoVe
+
+def sentences_to_indices(X, word_to_index, max_len):   
+    m = X.shape[0]#Размер обучающей выборки
+    
+    #Создание нулевой матрицы X_indices подходяещего размера (≈ 1 line)
+    X_indices = np.zeros((m,max_len))
+    
+    for i in range(m):# перебор обучающих примеров
+        #Разбиение предложения на массив слов.
+        sentence_words =[word.lower().replace('\t', '') for word in X[i].split(' ') if word.replace('\t', '') != '']
+        j = 0
+        
+        #Перевод всех слов в индекса словаря
+        for w in sentence_words:
+            try:
+                X_indices[i, j] = word_to_index[w]
+            except: 0
+            j = j+1
+    
+    return X_indices
+    
+#Создание слоя встраивания
+def pretrained_embedding_layer(word_to_vec_map, word_to_index):
+    vocab_len = len(word_to_index) + 1#Добавление +1 для сответсвия массива под Keras Embedding(Требование)
+    emb_dim = word_to_vec_map["cucumber"].shape[0]#Определение размерности массива GLoVe (= 50)
+    
+    #Инициализация матрицы относительно предыдущих преременных 
+    emb_matrix = np.zeros((vocab_len,emb_dim))
+    
+    #Приравнивание каждого индекса матрицы к индексам массива словаря.
+    for word, index in word_to_index.items():
+        emb_matrix[index, :] = word_to_vec_map[word]
+
+    #Определение количества входных и выходных слоев 
+    embedding_layer = Embedding(vocab_len, emb_dim, trainable = False)
+
+    #Инициализация встроенного слоя.
+    embedding_layer.build((None,))
+    
+    #Установка предварительных весов в встроенный слой
+    embedding_layer.set_weights([emb_matrix])
+    
+    return embedding_layer
+    
+def ltsm_model(input_shape, word_to_vec_map, word_to_index):    
+    #Определим sentence_indices для обзначения входного значения. Требования: shape input_shape и dtype 'int32'.
+    sentence_indices =  Input(shape=input_shape, dtype='int32')
+    
+    #Создание встроенного слоя (≈1 line)
+    embedding_layer = pretrained_embedding_layer(word_to_vec_map, word_to_index)
+    
+    #Протащим sentence_indices через встроенный слой для получения обратного распространения
+    embeddings = embedding_layer(sentence_indices)   
+    
+    #Добавим слой долгой-короткой памяти (LSTM layer) с размерностью 128 с возвратом партий предложений
+    #По окончанию получим партии предложений
+    X = LSTM(128, return_sequences=True)(embeddings)
+    #Добавим метод регуляризации Dropout для отсеивания с коэффициентом отсеивания 0.5
+    X = Dropout(0.5)(X)
+    #Добавим анологичный слой долгой-короткой памяти (LSTM layer), но без возврата партий предложений
+    X = LSTM(128, return_sequences=False)(X)
+    #Добавим метод регуляризации Dropout для отсеивания с коэффициентом отсеивания 0.5
+    X = Dropout(0.5)(X)
+    #Добавление плотного (линейного слоя) с 3 нейронами (0-Негативное,1-Нейтральное,2-Позитивное).
+    X = Dense(3, activation=None)(X)
+    #Назначение функции активации 
+    X = Activation('softmax')(X)
+    
+    
+    model = Model(inputs=[sentence_indices], outputs=X)
+    
+    return model
+    
+#Создание рекуррентной нейронной сети
+model = ltsm_model((maxLen,), word_to_vec_map, word_to_index)
+#Краткая информация о нейронной сети
+model.summary()
+
+#Обучение
+model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+X_train_indices = sentences_to_indices(X_train, word_to_index, maxLen)
+X_test_indices = sentences_to_indices(X_test, word_to_index, maxLen)
+print(X_train_indices.shape)
+
+
+earlystop = EarlyStopping(monitor='val_loss', min_delta=0, patience=3, verbose=0, mode='auto')
+
+model.fit(X_train_indices, y=Y_oh_train, batch_size=512, epochs=20, 
+          verbose=1, validation_data=(X_test_indices, Y_oh_test), callbacks=[earlystop])
+          
+#Заготовки для проверки нейронной сети
+#It was fine wheather then.
+#It was lovely wheather then.
+#It was bad wheather then.
+#He is wise man.
+#He is common man.
+#He is dumb man.
+#good
+#happy
+#better
+#bad
+#awful
+#terrible
+#neutral
+#fair
+#pink
+
+#Проверка нейронной сети
+x_test = np.array(['happy'])
+X_test_indices = sentences_to_indices(x_test, word_to_index, maxLen)
+print(x_test[0] +' '+  str(np.argmax(model.predict(X_test_indices))))
+#0 - плохое
+#1 - нейтральное
+#2 - хорошее
