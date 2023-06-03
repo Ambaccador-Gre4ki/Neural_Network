@@ -1,0 +1,202 @@
+import random
+import numpy as np
+import gzip
+import pickle
+from PIL import Image
+class Network(object):#нейросеть
+#конструктор сети
+    def __init__(self, sizes):
+        self.num_layers = len(sizes) #количество слоев нейронной сети
+        self.sizes = sizes #список размеров слоев нейронной сети
+        #смещения и веса генерируются случайным образом. первый слой является входным слоем, и
+        #смещения для этих нейронов нет, т.к. смещения используются только
+        #при вычислении выходных данных из более поздних слоев
+        self.biases = [np.random.randn(y, 1) for y in sizes[1:]]
+        self.weights = [np.random.randn(y, x)
+                        for x, y in zip(sizes[:-1], sizes[1:])]
+
+#Возвращает выходные данные сети, если введено значение "a".
+    def feedforward(self, a):
+        for b, w in zip(self.biases, self.weights):
+            a = sigmoid(np.dot(w, a)+b)
+        return a
+#обучение неронки с помощью стохастического градиентного спуска.
+#training_data - обучающая выборка
+#epochs - количество эпох обучения
+#mini_batch_size - размер подвыборки
+#eta - скорость обучения
+#test-data - тестирующая выборка. Если указано `test_data`, то сеть будет оцениваться по тестовым данным после каждой
+#эпохи и выводиться частичный прогресс. Это для отслеживания прогресса (существенно замедляет работу)
+    def SGD(self, training_data, epochs, mini_batch_size, eta,
+            test_data=None):
+        training_data = list(training_data)#создаем список объектов обучающей выборки
+        n = len(training_data)#вычисляем размер обучающей выборки
+        
+        if test_data:#Если указана test-data
+            test_data = list(test_data)#создаём список объектов тестируемой выборки
+            n_test = len(test_data)#вычисляем размер тестируемой выборки
+
+        for j in range(epochs):#для каждой эпохи
+            random.shuffle(training_data)#перемешиваем элементы обучающей выборки
+            mini_batches = [
+                training_data[k:k+mini_batch_size]#создаём подвыборки
+                for k in range(0, n, mini_batch_size)]
+            for mini_batch in mini_batches:#цикл по подвыборкам
+                self.update_mini_batch(mini_batch, eta)#один шаг градиентного спуска
+            if test_data:
+                print("Epoch {} : {} / {}".format(j,self.evaluate(test_data),n_test))#вывод точности обучения
+            else:
+                print("Epoch {} complete".format(j))#если нет тестируемой выборки, то обучение завершено
+        with open('biases.pkl', 'wb') as f:
+            pickle.dump(self.biases, f)
+        with open('weights.pkl', 'wb') as f:
+            pickle.dump(self.weights, f)
+
+                
+#обновление весов и смещений
+    def update_mini_batch(self, mini_batch, eta):
+        nabla_b = [np.zeros(b.shape) for b in self.biases]#список градиентов dC/db для каждого слоя
+        nabla_w = [np.zeros(w.shape) for w in self.weights]#список градиентов dC/dw для каждого слоя
+        for x, y in mini_batch:
+            delta_nabla_b, delta_nabla_w = self.backprop(x, y)#послойно вычисляем градиенты dC/db и dC/dw для текущего прецедента
+            nabla_b = [nb+dnb for nb, dnb in zip(nabla_b, delta_nabla_b)]#суммируем градиенты dC/db для различных прецедентов текущей подвыборки
+            nabla_w = [nw+dnw for nw, dnw in zip(nabla_w, delta_nabla_w)]#суммируем градиенты dC/dw для различных прецедентов текущей подвыборки
+        self.weights = [w-(eta/len(mini_batch))*nw
+                        for w, nw in zip(self.weights, nabla_w)]#обновляем все веса нейронной сети
+        self.biases = [b-(eta/len(mini_batch))*nb
+                       for b, nb in zip(self.biases, nabla_b)]#обновляем все смещения нейронной сети
+        
+#Возвращает nabla_b и nabla_w, представляющиe градиент
+#x - вектор входных сигналов
+#y - ожидаемый вектор выходных сигналов
+    def backprop(self, x, y):
+        nabla_b = [np.zeros(b.shape) for b in self.biases]#список градиентов dC/db для каждого слоя
+        nabla_w = [np.zeros(w.shape) for w in self.weights]#список градиентов dC/dw для каждого слоя
+        
+        activation = x#выходные сигналы слоя (первоначально соответствует выходным сигналам 1-го слоя или входным сигналам сети)
+        activations = [x]#список выходных сигналов по всем слоям (первоначально содержит только выходные сигналы 1-го слоя)
+        zs = [] #список активационных потенциалов по всем слоям (первоначально пуст)
+        
+        for b, w in zip(self.biases, self.weights):
+            z = np.dot(w, activation)+b #считаем активационные потенциалы текущего слоя
+            zs.append(z)#добавляем элемент (активационные потенциалы слоя) в конец списка
+            activation = sigmoid(z)#считаем выходные сигналы текущего слоя, применяя сигмоидальную функцию активации к активационным потенциалам слоя
+            activations.append(activation)#добавляем элемент (выходные сигналы слоя) в конец списка
+        
+        #обратное распространение
+        delta = self.cost_derivative(activations[-1], y) * \
+            sigmoid_prime(zs[-1])#считаем меру влияния нейронов выходного слоя L на величину ошибки (BP1)
+        nabla_b[-1] = delta #градиент dC/db для слоя L
+        nabla_w[-1] = np.dot(delta, activations[-2].transpose())# градиент dC/dw для слоя L
+#-1 - последний слой нейронов
+        for l in range(2, self.num_layers):
+            z = zs[-l]#aктивационные потенциалы l-го слоя
+            sp = sigmoid_prime(z)#считаем сигмоидальную функцию от активационных потенциалов l-го слоя
+            delta = np.dot(self.weights[-l+1].transpose(), delta) * sp#считаем меру влияния нейронов l-го слоя на величину ошибки
+            nabla_b[-l] = delta#градиент dC/db для l-го слоя
+            nabla_w[-l] = np.dot(delta, activations[-l-1].transpose())#градиент dC/dw для l-го слоя
+        return (nabla_b, nabla_w)
+
+#оценка прогресса. Возвращает количество тестовых входных данных, для которых нейронная
+#сеть выдает правильный результат.
+#Предполагается, что выходным сигналом нейронной сети является индекс того
+#нейрона в конечном слое, который имеет наибольшую активацию.
+    def evaluate(self, test_data):
+        test_results = [(np.argmax(self.feedforward(x)), y)
+                        for (x, y) in test_data]
+        return sum(int(x == y) for (x, y) in test_results)
+
+#Вычисление частных производных стоимостной функции по выходным сигналам последнего слоя    
+    def cost_derivative(self, output_activations, y):
+        return (output_activations-y)
+
+#Сигмоида 
+def sigmoid(z):
+    return 1.0/(1.0+np.exp(-z))
+#Производная сигмоиды
+def sigmoid_prime(z):
+    return sigmoid(z)*(1-sigmoid(z))
+#Возвращает данные MNIST в виде кортежа, содержащего обучающие данные, данные проверки и тестовые данные.
+#training_data возвращается в виде кортежа с двумя записями. Первая запись содержит фактические обучающие изображения. Это
+#numpy ndarray с 50 000 записей. Каждая запись, в свою очередь, представляет собой
+#numpy ndarray с 784 значениями, представляющими 28 * 28 = 784 пикселы в одном MNIST-изображении.
+
+#Вторая запись в кортеже training_data - это numpy ndarray, содержащий 50 000 записей. Эти записи представляют собой
+#всего лишь цифровые значения (0...9) для соответствующих изображений, содержащихся в первой записи кортежа.
+
+#validation_data и test_data похожи, за исключением того, что каждый содержит только 10 000 изображений.
+def load_data():
+    f = gzip.open('mnist.pkl.gz', 'rb') #открываем сжатый файл gzip в двоичном режиме
+    training_data, validation_data, test_data = pickle.load(f, encoding="latin1")# загружам данные из файла
+    f.close()
+    return (training_data, validation_data, test_data)
+
+#трансформирует изображения в список с массивами. Первый - 784-размерный массив с битами изображения.
+#Второй - 10-размерный, у которого координата с порядковым номером, соответствующим цифре на изображении, равняется единице, а остальные координаты нулевые
+def load_data_wrapper():
+    tr_d, va_d, te_d = load_data()#инициализация наборов данных в формате MNIST
+    
+    training_inputs = [np.reshape(x, (784, 1)) for x in tr_d[0]]#преобразование массивов размера 1 на 784 к массивам размера 784 на 1
+    training_results = [vectorized_result(y) for y in tr_d[1]]#представление цифр от 0 до 9 в виде массивов размера 10 на 1
+    training_data = zip(training_inputs, training_results)#формируем набор обучающих данных из пар (x, y)
+    
+    validation_inputs = [np.reshape(x, (784, 1)) for x in va_d[0]]
+    validation_data = zip(validation_inputs, va_d[1])
+    
+    test_inputs = [np.reshape(x, (784, 1)) for x in te_d[0]]
+    test_data = zip(test_inputs, te_d[1])
+    
+    return (training_data, validation_data, test_data)
+
+#Возвращает 10-мерный единичный вектор с 1.0 в j-й позиции и нулями в других местах.
+#Это используется для преобразования цифры (0...9) в соответствующий выходной сигнал
+def vectorized_result(j):
+    e = np.zeros((10, 1))
+    e[j] = 1.0
+    return e
+    
+
+training_data, validation_data, test_data = load_data_wrapper()#загрузка данных
+net = Network([784, 40, 10])#создание нейросети. В первом слое - 784 нейрона. Во втором - 30. В последнем - 10
+net.SGD(training_data, 30, 10, 5.0, test_data=test_data)#обучение
+#(обучающая выборка, количество эпох обучения, размер подвыборки, скорость обучения, тестирующая выборка)
+import numpy as np # библиотека функций для работы с матрицами
+import pickle
+
+def sigmoid(z): # определение сигмоидальной функции активации
+    return 1.0/(1.0+np.exp(-z))
+
+class Network_1(object): # используется для описания нейронной сети
+    def feedforward(self, a):
+        for b, w in zip(self.biases, self.weights):
+            a = sigmoid(np.dot(w, a)+b)
+        return a
+
+    def __init__(self, sizes): # конструктор класса
+    # self – указатель на объект класса
+    # sizes – список размеров слоев нейронной сети
+        self.num_layers = len(sizes) # задаем количество слоев нейронной сети
+        self.sizes = sizes # задаем список размеров слоев нейронной сети
+
+        with open('biases.pkl', 'rb') as f: #открытие файла со смещениями
+            self.biases = pickle.load(f)
+        with open('weights.pkl', 'rb') as f: #открытие файла с весами
+            self.weights = pickle.load(f)
+###################################################################################################
+############## Для открытия разных ккартинок менять название в строке Image.open ##################
+###################################################################################################
+im=Image.open("0.bmp") #открытие рисунка
+testArray=np.ndarray(shape=(784, 1), dtype=float, order='F') #создание контейнера для копирования значения пикселей изображения
+
+#операция копирования в контейнер пикселей изображения
+for i2 in range(28):
+    for i1 in range(28):
+        if (im.getpixel((i1, i2))) / 255 > 0:
+            #костыль, т.к. 1 в значении пикселей нейросеть неадекватно воспринимает
+            testArray[i1 + i2 * 28, 0] = (im.getpixel((i1, i2))) / 255 - 0.001
+        else:
+            testArray[i1 + i2 * 28,0] = (im.getpixel((i1, i2))) / 255
+
+netSm = Network_1([784, 30, 10]) #создаем нейросеть с обученными весами и смещениями
+print(netSm.feedforward(testArray)) #распознаем изображение с помощью нейросети
+im
